@@ -37,6 +37,20 @@ SITE_BUCKET = os.environ["SITE_BUCKET"]
 INFERENCE_PROFILE_ID = os.environ["INFERENCE_PROFILE_ID"]
 GITHUB_TOKEN_PARAM = os.environ.get("GITHUB_TOKEN_PARAM", "")
 
+# Readers do not write prose into this prompt - they pick from a closed list,
+# and these are the sentences the code puts in on their behalf. Keep the keys in
+# sync with ALLOWED_PREFS in src/feedback/app.py.
+PREFERENCES = {
+    "shorter": "Keep it shorter than usual.",
+    "longer": "Go into more detail than usual.",
+    "less_flattery": "Do not compliment the developer. Report the day, do not praise it.",
+    "more_technical": "Be more technical: name files, tools, and specific errors.",
+    "less_technical": "Use less jargon.",
+    "warmer": "Take a warmer, more personal tone.",
+    "drier": "Take a drier, more factual tone.",
+    "more_specific": "Be concrete. Prefer specifics over general statements.",
+}
+
 MAX_ATTEMPTS = 3
 HISTORY_ON_SITE = 30
 RECENT_FOR_PROMPT = 5
@@ -234,9 +248,11 @@ def build_digest(day: str, events: list[dict], user: str, token: str | None) -> 
 
 def load_style() -> dict:
     item = table.get_item(Key={"pk": f"USER#{GITHUB_USER}", "sk": "STYLE"}).get("Item") or {}
+    # Anything not in PREFERENCES is dropped, so a slug that somehow got past the
+    # feedback handler still cannot put a single character into the prompt.
+    prefs = [str(x) for x in item.get("prefs", []) if str(x) in PREFERENCES]
     return {
-        "likes": [str(x) for x in item.get("likes", [])],
-        "dislikes": [str(x) for x in item.get("dislikes", [])],
+        "prefs": prefs,
         "up": int(item.get("up", 0)),
         "down": int(item.get("down", 0)),
     }
@@ -288,10 +304,9 @@ def build_prompt(day: str, digest: dict, style: dict, recent: list[dict]) -> str
         parts += ["", "Titles you already used recently (do not repeat them or their angle):"]
         parts += [f"- {r.get('title', '')}" for r in recent]
 
-    if style["likes"] or style["dislikes"]:
-        parts += ["", "What this reader has told you, in their own words:"]
-        parts += [f"- more of this: {s}" for s in style["likes"][-6:]]
-        parts += [f"- less of this: {s}" for s in style["dislikes"][-6:]]
+    if style["prefs"]:
+        parts += ["", "Standing preferences this reader has set:"]
+        parts += [f"- {PREFERENCES[p]}" for p in style["prefs"]]
 
     if digest["commit_count"] == 0 and not digest["highlights"]:
         parts += ["", "There was no public activity today. Write the quiet-day entry: honest, short, no invented work."]

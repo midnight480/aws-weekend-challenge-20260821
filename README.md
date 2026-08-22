@@ -15,8 +15,9 @@ out what the day was actually *about*, and writes a 4–7 sentence journal entry
 in English and Japanese. It never invents work: every claim it makes traces back
 to a real commit, pull request, or branch in that day's digest.
 
-You can tell it what you think — 👍/👎 plus one sentence. That sentence goes into
-a persistent style memory and shapes tomorrow's entry.
+You can tell it what you think — 👍/👎 plus, optionally, one preference from a
+fixed list. That preference goes into a persistent style memory and shapes
+tomorrow's entry.
 
 ## Architecture
 
@@ -40,7 +41,7 @@ reader ──▶ API Gateway (HTTP) ──▶ Lambda (feedback) ──▶ Dynamo
 | Amazon DynamoDB | Journal entries and the style memory the agent learns from. |
 | Amazon S3 | Private bucket. No public access, no website hosting. |
 | Amazon CloudFront | The only way in, via Origin Access Control. |
-| Amazon API Gateway (HTTP API) | One `POST /feedback` route. There is no route that can make it generate. |
+| Amazon API Gateway (HTTP API) | One `POST /feedback` route, accepting a vote and one slug from a fixed list. |
 
 ## Design decisions worth knowing
 
@@ -67,6 +68,13 @@ the same word count is exactly how you get an agent that pads.
 
 **Titles are deduplicated in code, not in the prompt.** Asking the model not to
 repeat itself does not work. Rejecting the reply does.
+
+**Feedback is a closed vocabulary, not a text box.** The feedback endpoint is
+public and unauthenticated, and its output ends up published under the owner's
+name. An earlier version stored a free-text note and folded it into the nightly
+prompt as reader guidance — six requests were enough to own that whole section.
+It now accepts eight fixed slugs, and the prompt gets a sentence the agent's own
+source file owns, looked up by slug. No caller-supplied text reaches the model.
 
 **Commit messages are user data.** Emails and anything shaped like a token are
 scrubbed before they reach the model or the public site.

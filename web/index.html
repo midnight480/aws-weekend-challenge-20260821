@@ -76,12 +76,9 @@
   .tags { margin-top: 1.1rem; display: flex; gap: .4rem; flex-wrap: wrap; }
   .tags span { font: 400 .72rem/1 var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: .35rem .6rem; }
   .vote { margin-top: 1.25rem; padding-top: 1.1rem; border-top: 1px dashed var(--line); display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-  .vote input {
-    flex: 1 1 12rem; min-width: 0;
-    font: 400 .8rem/1.4 var(--mono);
-    padding: .5rem .7rem; border-radius: 8px;
-    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
-  }
+  .vote .prefs { display: flex; gap: .4rem; flex-wrap: wrap; }
+  .vote .prefs button { font-size: .72rem; padding: .4rem .6rem; }
+  .vote .label { font: 400 .72rem/1.4 var(--mono); color: var(--muted); width: 100%; }
   .vote .said { font: 400 .76rem/1.4 var(--mono); color: var(--accent); }
   .empty, .error { color: var(--muted); font: 400 .9rem/1.7 var(--mono); }
   footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--muted); font: 400 .78rem/1.7 var(--mono); }
@@ -107,7 +104,17 @@
 </div>
 
 <script>
-const state = { lang: localStorage.getItem("muse-lang") || "en", data: null, endpoint: null };
+const state = { lang: localStorage.getItem("muse-lang") || "en", data: null, endpoint: null, pref: {} };
+
+// The complete vocabulary. There is no free-text field here on purpose: these
+// slugs are the only thing the agent's style memory will accept, so nothing a
+// visitor types can ever reach the prompt that writes tomorrow's entry.
+const PREFS = [
+  ["shorter", "shorter"], ["longer", "longer"],
+  ["less_flattery", "no flattery"], ["more_technical", "more technical"],
+  ["less_technical", "less jargon"], ["warmer", "warmer"],
+  ["drier", "drier"], ["more_specific", "more specific"],
+];
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -131,24 +138,33 @@ function render() {
       <div class="vote" data-date="${esc(e.date)}">
         <button data-vote="up">good read</button>
         <button data-vote="down">not for me</button>
-        <input type="text" maxlength="200" placeholder="tell it what to change (optional)">
+        <span class="label">then, optionally, nudge tomorrow's entry:</span>
+        <span class="prefs">${PREFS.map(p =>
+          `<button data-pref="${p[0]}">${p[1]}</button>`).join("")}</span>
       </div>
     </article>`;
   }).join("");
 }
 
 document.addEventListener("click", async ev => {
-  const btn = ev.target.closest("[data-vote]");
+  const btn = ev.target.closest("[data-vote], [data-pref]");
   if (!btn || !state.endpoint) return;
   const box = btn.closest(".vote");
-  const input = box.querySelector("input");
+  const date = box.dataset.date;
+
+  // A preference on its own still needs a vote to travel with; remember the last
+  // one this reader gave for this entry, and default to a thumbs up.
+  const vote = btn.dataset.vote || state.pref[date] || "up";
+  if (btn.dataset.vote) state.pref[date] = btn.dataset.vote;
+
   box.querySelectorAll("button").forEach(b => (b.disabled = true));
   try {
-    await fetch(state.endpoint, {
+    const r = await fetch(state.endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ date: box.dataset.date, vote: btn.dataset.vote, note: input.value.trim() }),
+      body: JSON.stringify({ date, vote, pref: btn.dataset.pref || "" }),
     });
+    if (!r.ok) throw new Error(String(r.status));
     box.innerHTML = '<span class="said">noted — tomorrow\'s entry will take it into account.</span>';
   } catch {
     box.innerHTML = '<span class="said">could not send that. try again later.</span>';
