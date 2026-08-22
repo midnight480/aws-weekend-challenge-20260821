@@ -1,0 +1,4 @@
+.aws-sam/
+web/config.json
+*.pyc
+__pycache__/

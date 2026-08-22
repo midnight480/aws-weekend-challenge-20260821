@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Commit Muse - an always-on agent that reads your day of GitHub activity every
+  night, writes a developer journal with Amazon Bedrock, and has it waiting for
+  you in the morning. Nothing to open, no button to press.
+
+Parameters:
+  GitHubUser:
+    Type: String
+    Description: GitHub login whose public activity the agent reads.
+    Default: midnight480
+  FoundationModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+  InferenceProfileId:
+    Type: String
+    Description: Cross-region inference profile used to call the model.
+    Default: us.amazon.nova-lite-v1:0
+  ScheduleExpression:
+    Type: String
+    Description: When the agent wakes up (EventBridge Scheduler cron).
+    Default: cron(0 22 * * ? *)
+  ScheduleTimezone:
+    Type: String
+    Default: Asia/Tokyo
+  GitHubTokenParam:
+    Type: String
+    Description: >
+      Optional SSM SecureString parameter name holding a GitHub PAT. Leave empty
+      to read public activity anonymously.
+    Default: ""
+
+Conditions:
+  HasGitHubToken: !Not [!Equals [!Ref GitHubTokenParam, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.13
+    MemorySize: 512
+    Timeout: 120
+    Architectures: [arm64]
+    Tracing: Active
+    LoggingConfig:
+      LogFormat: JSON
+
+Resources:
+  ##########################################################################
+  # Memory: journal entries + the style preferences the agent learns from  #
+  ##########################################################################
+  MuseTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  ##########################################################################
+  # Delivery: private bucket, served only through CloudFront (OAC)         #
+  ##########################################################################
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  SiteOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} - Commit Muse"
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+        Origins:
+          - Id: SiteS3Origin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SiteOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: SiteS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # Managed-CachingOptimized: honours the Cache-Control we write per object
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          # Managed-SecurityHeadersPolicy
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution.Id}"
+
+  ##########################################################################
+  # The agent itself                                                       #
+  ##########################################################################
+  MuseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/muse/
+      Handler: app.handler
+      Description: Nightly agent - reads GitHub activity, writes the journal.
+      Environment:
+        Variables:
+          GITHUB_USER: !Ref GitHubUser
+          TABLE_NAME: !Ref MuseTable
+          SITE_BUCKET: !Ref SiteBucket
+          INFERENCE_PROFILE_ID: !Ref InferenceProfileId
+          GITHUB_TOKEN_PARAM: !Ref GitHubTokenParam
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MuseTable
+        - S3WritePolicy:
+            BucketName: !Ref SiteBucket
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/${FoundationModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${InferenceProfileId}"
+        - !If
+          - HasGitHubToken
+          - Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${GitHubTokenParam}"
+          - !Ref AWS::NoValue
+      Events:
+        Nightly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: !Ref ScheduleExpression
+            ScheduleExpressionTimezone: !Ref ScheduleTimezone
+            Description: Wake Commit Muse up once a day.
+
+  MuseFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${MuseFunction}"
+      RetentionInDays: 14
+
+  ##########################################################################
+  # Feedback: the only write path a human has, and it cannot generate      #
+  ##########################################################################
+  FeedbackApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: ["content-type"]
+        AllowMethods: ["POST", "OPTIONS"]
+        MaxAge: 300
+
+  FeedbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/feedback/
+      Handler: app.handler
+      Timeout: 15
+      Description: Records a thumbs up/down and feeds it into the agent's style memory.
+      Environment:
+        Variables:
+          GITHUB_USER: !Ref GitHubUser
+          TABLE_NAME: !Ref MuseTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MuseTable
+      Events:
+        Post:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref FeedbackApi
+            Path: /feedback
+            Method: POST
+
+  FeedbackFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FeedbackFunction}"
+      RetentionInDays: 14
+
+Outputs:
+  SiteUrl:
+    Description: The journal. You never have to open it, but you can.
+    Value: !Sub "https://${SiteDistribution.DomainName}"
+  SiteBucketName:
+    Value: !Ref SiteBucket
+  FeedbackEndpoint:
+    Value: !Sub "https://${FeedbackApi}.execute-api.${AWS::Region}.amazonaws.com/v1/feedback"
+  MuseFunctionName:
+    Value: !Ref MuseFunction
+  DistributionId:
+    Value: !Ref SiteDistribution
