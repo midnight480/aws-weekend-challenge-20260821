@@ -64,6 +64,39 @@ lookup each, capped at six a day so a backfill cannot burn the rate limit. Every
 one of those calls returns `None` instead of raising on a 4xx — a rate limit or
 a repo that went private should never take the whole night down.
 
+### The part I got wrong second
+
+With commit messages flowing again, I hit a subtler version of the same problem.
+I was fetching them with `?author=midnight480`, which seems obviously correct.
+
+It silently skipped the commit I had just pushed.
+
+GitHub only links a commit to an account when the commit's email is a verified
+address on that account. My local `user.email` was a placeholder, so GitHub
+listed the commit but attributed it to nobody — and `?author=<login>` filtered
+out my own work in my own repository.
+
+So the agent stopped delegating the question of identity. It fetches the day's
+commits unfiltered and decides for itself:
+
+```python
+def _is_theirs(commit, user):
+    login = ((commit.get("author") or {}).get("login") or "").lower()
+    if login:
+        return login == user.lower()          # GitHub knows: trust it
+    author = commit.get("commit", {}).get("author", {})
+    name = (author.get("name") or "").lower() # GitHub doesn't: look at the commit
+    email = (author.get("email") or "").lower()
+    return user.lower() in (name, email.split("@")[0])
+```
+
+The effect was not marginal. On 2026-08-11 the agent had been seeing 5 commits.
+With identity matched on the commit itself, it sees **12** — including the real
+ones like `fix(ci): remove continue-on-error from SARIF upload step`, which had
+been invisible behind a wall of merge commits.
+
+An agent that reads your work is only as good as its definition of "your".
+
 ### Making a small model behave
 
 I used **Amazon Nova Lite** through the Bedrock `converse` API. It is cheap, it
@@ -187,6 +220,12 @@ in output came from a rule that rejects a reply, not from a nicer prompt. Prompt
 instructions are suggestions; validators are guarantees. The title-dedup check is
 the clearest example — the same instruction in the prompt was simply ignored.
 
+**"Filter it server-side" is a decision, not a shortcut.** Every filter you hand
+to someone else's API is a definition you have accepted without reading it.
+`?author=<login>` sounds like "commits by me" and actually means "commits GitHub
+has successfully linked to me," and the gap between those two swallowed more than
+half my history.
+
 **Newer is not better by default.** Nova 2 Lite lost to Nova Lite on my actual
 data, on the specific things I cared about. Ten minutes of comparison beat an
 assumption.
@@ -199,6 +238,21 @@ the start and would have been an unpleasant refactor later.
 a sentence in a prompt — it is a digest the model cannot see past, a validator
 that rejects thin output, and a quiet-day path that says "nothing happened"
 without embarrassment.
+
+## The first thing it wrote about me
+
+I deployed it, made the repository public, and let the agent run over the day it
+was built. It had no idea it was writing about itself:
+
+> Today, midnight480 worked diligently on the 'aws-weekend-challenge-20260821'
+> repository, starting with an initial commit to lay the foundation. They also
+> added 'Commit Muse,' an intriguing agent designed to journal their GitHub
+> activities. This repository has been made public, marking a significant
+> milestone. [...] It's a quiet yet purposeful day, with each step meticulously
+> documented.
+
+Tomorrow it will do that again, and I will not be there for it. That was the
+whole point.
 
 ## Links
 

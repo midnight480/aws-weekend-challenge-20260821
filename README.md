@@ -51,6 +51,12 @@ this agent dutifully reported "0 commits" on a day with fourteen pushes. The fix
 is to treat the events feed as an *index* and go ask the repositories themselves
 (`/repos/{repo}/commits?author=&since=&until=`) for the content.
 
+**GitHub's idea of "your commits" is narrower than yours.** `?author=<login>`
+only returns commits whose email is a verified address on that account — a local
+`user.email` typo is enough to make your own work invisible. The agent fetches
+unfiltered and matches identity on the commit itself, which took one day from 5
+visible commits to 12.
+
 **It would rather write nothing than write something broken.** The model reply
 must parse as JSON, carry every required field, be long enough for the day it
 describes, and not reuse a recent title. Three strikes and the day stays empty.

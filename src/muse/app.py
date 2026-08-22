@@ -134,17 +134,34 @@ def group_by_day(events: list[dict]) -> dict[str, list[dict]]:
     return days
 
 
+def _is_theirs(commit: dict, user: str) -> bool:
+    """Does this commit belong to the person we are writing about?
+
+    GitHub only links a commit to an account when the commit's email is a
+    verified address on that account. A local `user.email` typo is enough to
+    make `?author=<login>` silently skip real work - so identity is matched on
+    the commit itself as well as on GitHub's attribution.
+    """
+    login = ((commit.get("author") or {}).get("login") or "").lower()
+    if login:
+        return login == user.lower()
+    author = commit.get("commit", {}).get("author", {})
+    name = (author.get("name") or "").lower()
+    email = (author.get("email") or "").lower()
+    return user.lower() in (name, email.split("@")[0])
+
+
 def fetch_commit_messages(repo: str, user: str, day: str, token: str | None) -> list[str]:
     """Ask the repository what this person actually committed on this day."""
     since = f"{day}T00:00:00%2B09:00"
     until = f"{day}T23:59:59%2B09:00"
-    data = _get(
-        f"/repos/{repo}/commits?author={user}&since={since}&until={until}&per_page=30", token
-    )
+    data = _get(f"/repos/{repo}/commits?since={since}&until={until}&per_page=50", token)
     if not isinstance(data, list):
         return []
     out = []
     for c in data:
+        if not _is_theirs(c, user):
+            continue
         subject = (c.get("commit", {}).get("message") or "").splitlines()[0]
         if subject:
             out.append(_scrub(subject))
